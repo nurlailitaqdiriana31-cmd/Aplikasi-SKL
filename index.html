@@ -107,7 +107,7 @@
                 <div>
                     <label class="block text-sm font-semibold text-gray-700 mb-1">Tipe Login</label>
                     <div class="relative">
-                        <select id="loginType" onchange="updateLoginHint()" class="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none appearance-none transition-all bg-gray-50/50">
+                        <select id="loginType" onchange="updateLoginHint()" class="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 focus:border-yellow-500 focus:ring-2 focus:ring-yellow-200 outline-none appearance-none transition-all bg-gray-50/50">
                             <option value="siswa">Siswa</option>
                             <option value="admin">Administrator</option>
                         </select>
@@ -119,7 +119,7 @@
                 <div>
                     <label id="usernameLabel" class="block text-sm font-semibold text-gray-700 mb-1">NISN (Nomor Induk Siswa Nasional)</label>
                     <div class="relative">
-                        <input type="text" id="username" placeholder="Masukkan ID" maxlength="20" class="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 outline-none transition-all bg-gray-50/50">
+                        <input type="text" id="username" placeholder="Masukkan ID" maxlength="20" class="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 focus:border-yellow-500 focus:ring-2 focus:ring-yellow-200 outline-none transition-all bg-gray-50/50">
                         <i class="ph ph-identification-card text-gray-400 absolute left-3 top-3.5 text-lg"></i>
                     </div>
                 </div>
@@ -362,18 +362,35 @@
         </div>
     </div>
 
-<script>
-    // --- Data Base Mock ---
+<!-- Firebase SDK Integrations -->
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, getDoc, collection, onSnapshot, updateDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // --- Firebase Initialization Configs ---
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'sistem-kelulusan-sdn3';
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+        apiKey: "",
+        authDomain: "",
+        projectId: "",
+        storageBucket: "",
+        messagingSenderId: "",
+        appId: ""
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const db = getFirestore(app);
+
+    // Local state mirror for reactive sync
     let database = {
-        siswa: [
-            { nisn: '1234567890', nama: 'Ahmad Ridho Pratama', tempat: 'Kuala Pembuang', tgl: '2012-03-15', orangtua: 'Budi Santoso', status: 'lulus', skl: null },
-            { nisn: '1234567891', nama: 'Siti Nurhaliza', tempat: 'Kuala Pembuang', tgl: '2012-05-20', orangtua: 'Ahmad Wijaya', status: 'lulus', skl: null },
-            { nisn: '1234567892', nama: 'Budi Santoso', tempat: 'Kuala Pembuang', tgl: '2012-07-10', orangtua: 'Sugeng Riyanto', status: 'belum', skl: null }
-        ]
+        siswa: []
     };
 
     let currentUser = null;
     let pendingDeleteIndex = null;
+    let authInitialized = false;
 
     // --- Audio Effects untuk Kelulusan ---
     const soundSuccess = new Audio('https://assets.mixkit.co/active_storage/sfx/2000/2000-preview.mp3'); // Suara Chimes berkilau
@@ -386,7 +403,6 @@
         const container = document.getElementById('toastContainer');
         const toast = document.createElement('div');
         
-        // Define colors based on type
         const colors = {
             success: 'bg-green-500',
             error: 'bg-red-500',
@@ -411,7 +427,6 @@
 
         container.appendChild(toast);
 
-        // Auto remove
         setTimeout(() => {
             toast.classList.remove('toast-enter');
             toast.classList.add('toast-exit');
@@ -428,7 +443,6 @@
         const content = document.getElementById('confirmModalContent');
         
         modal.classList.remove('hidden');
-        // small delay for transition
         setTimeout(() => {
             modal.classList.remove('opacity-0');
             content.classList.remove('scale-95');
@@ -448,19 +462,101 @@
         }, 300);
     }
 
-    document.getElementById('confirmBtn').addEventListener('click', () => {
-        if (pendingDeleteIndex !== null) {
-            database.siswa.splice(pendingDeleteIndex, 1);
-            updateSiswaList();
-            updateSiswaPilihan();
-            updateVerifikasi();
-            showToast('Data siswa berhasil dihapus.', 'success');
+    // Modal Confirmation Execution
+    document.getElementById('confirmBtn').addEventListener('click', async () => {
+        if (pendingDeleteIndex !== null && authInitialized) {
+            try {
+                const targetSiswa = database.siswa[pendingDeleteIndex];
+                await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'siswa', targetSiswa.nisn));
+                showToast('Data siswa berhasil dihapus dari server.', 'success');
+            } catch (error) {
+                console.error("Delete failed:", error);
+                showToast('Gagal menghapus data dari database.', 'error');
+            }
             closeConfirmModal();
         }
     });
 
+    // --- Firebase Live Synchronization ---
+    function setupDatabaseListener() {
+        // RULE 1: Strict collection path /artifacts/{appId}/public/data/{collectionName}
+        const siswaCollection = collection(db, 'artifacts', appId, 'public', 'data', 'siswa');
+        
+        // RULE 2: Keep simple query and load in-memory sorting
+        onSnapshot(siswaCollection, async (snapshot) => {
+            // Seed initial data once if completely empty on fresh instance
+            if (snapshot.empty) {
+                await seedInitialData();
+                return;
+            }
 
-    // --- Core Functions ---
+            database.siswa = [];
+            snapshot.forEach((doc) => {
+                database.siswa.push(doc.data());
+            });
+
+            // Sort alphabetically in memory
+            database.siswa.sort((a, b) => a.nama.localeCompare(b.nama));
+
+            // Sync student's active session live if data updates
+            if (currentUser && currentUser.role === 'siswa') {
+                const liveData = database.siswa.find(s => s.nisn === currentUser.nisn);
+                if (liveData) {
+                    currentUser.data = liveData;
+                    showSiswaPortal(true); // Silent live sync
+                }
+            }
+
+            // Refresh UI components
+            updateSiswaList();
+            updateSiswaPilihan();
+            updateVerifikasi();
+        }, (error) => {
+            console.error("Firebase Sync Error:", error);
+            showToast("Koneksi database terganggu.", "error");
+        });
+    }
+
+    // Seed mock data securely to Cloud Firestore on first setup
+    async function seedInitialData() {
+        const defaultSiswa = [
+            { nisn: '1234567890', nama: 'Ahmad Ridho Pratama', tempat: 'Kuala Pembuang', tgl: '2012-03-15', orangtua: 'Budi Santoso', status: 'lulus', skl: null },
+            { nisn: '1234567891', nama: 'Siti Nurhaliza', tempat: 'Kuala Pembuang', tgl: '2012-05-20', orangtua: 'Ahmad Wijaya', status: 'lulus', skl: null },
+            { nisn: '1234567892', nama: 'Budi Santoso', tempat: 'Kuala Pembuang', tgl: '2012-07-10', orangtua: 'Sugeng Riyanto', status: 'belum', skl: null }
+        ];
+
+        try {
+            for (const s of defaultSiswa) {
+                await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'siswa', s.nisn), s);
+            }
+        } catch (e) {
+            console.error("Seeding initial database failed: ", e);
+        }
+    }
+
+    // --- Authentication Flow ---
+    const initAuth = async () => {
+        try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        } catch (error) {
+            console.error("Auth Exception:", error);
+            showToast("Gagal melakukan otorisasi database.", "error");
+        }
+    };
+    initAuth();
+
+    onAuthStateChanged(auth, (usr) => {
+        if (usr) {
+            authInitialized = true;
+            setupDatabaseListener();
+        }
+    });
+
+    // --- UI Controls & Event Bindings ---
     function updateLoginHint() {
         const type = document.getElementById('loginType').value;
         const label = document.getElementById('usernameLabel');
@@ -496,7 +592,7 @@
             const siswa = database.siswa.find(s => s.nisn === username);
             if (siswa && password === '1234') {
                 currentUser = { role: 'siswa', nisn: username, data: siswa };
-                showSiswaPortal();
+                showSiswaPortal(false); // First login triggers sounds & sparkles
                 showToast(`Selamat datang, ${siswa.nama.split(' ')[0]}`, 'success');
             } else {
                 showToast('NISN tidak terdaftar atau password salah!', 'error');
@@ -510,12 +606,9 @@
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('adminPanel').classList.remove('hidden');
         switchTab('data');
-        updateSiswaList();
-        updateSiswaPilihan();
-        updateVerifikasi();
     }
 
-    function showSiswaPortal() {
+    function showSiswaPortal(isSilentUpdate = false) {
         document.getElementById('loginScreen').style.display = 'none';
         document.getElementById('siswaPortal').classList.remove('hidden');
         document.getElementById('siswaPortal').classList.add('flex');
@@ -530,41 +623,39 @@
             document.getElementById('displayNamaSiswa').textContent = currentUser.data.nama;
             document.getElementById('displayNisnSiswa').textContent = currentUser.data.nisn;
 
-            // Trigger Suara Bahagia
-            soundSuccess.currentTime = 0;
-            soundCheer.currentTime = 0;
-            soundSuccess.play().catch(e => console.log('Autoplay ditolak oleh browser'));
-            setTimeout(() => soundCheer.play().catch(e => {}), 400);
+            // Trigger celebration on initial login only
+            if (!isSilentUpdate) {
+                soundSuccess.currentTime = 0;
+                soundCheer.currentTime = 0;
+                soundSuccess.play().catch(e => console.log('Autoplay ditolak oleh browser'));
+                setTimeout(() => soundCheer.play().catch(e => {}), 400);
 
-            // Trigger Confetti (Kertas warna-warni)
-            let duration = 3 * 1000;
-            let animationEnd = Date.now() + duration;
-            let defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 50 };
+                // Confetti Launch
+                let duration = 3 * 1000;
+                let animationEnd = Date.now() + duration;
+                let defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 50 };
 
-            function randomInRange(min, max) {
-                return Math.random() * (max - min) + min;
+                const randomInRange = (min, max) => Math.random() * (max - min) + min;
+
+                let interval = setInterval(function() {
+                    let timeLeft = animationEnd - Date.now();
+                    if (timeLeft <= 0) {
+                        return clearInterval(interval);
+                    }
+                    let particleCount = 50 * (timeLeft / duration);
+                    
+                    confetti(Object.assign({}, defaults, { 
+                        particleCount, 
+                        origin: { x: randomInRange(0.1, 0.3), y: Math.random() - 0.2 },
+                        colors: ['#ffd700', '#1e3a8a', '#ffffff'] 
+                    }));
+                    confetti(Object.assign({}, defaults, { 
+                        particleCount, 
+                        origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 },
+                        colors: ['#ffd700', '#1e3a8a', '#ffffff'] 
+                    }));
+                }, 250);
             }
-
-            let interval = setInterval(function() {
-                let timeLeft = animationEnd - Date.now();
-                if (timeLeft <= 0) {
-                    return clearInterval(interval);
-                }
-                let particleCount = 50 * (timeLeft / duration);
-                
-                // Letupan Kiri
-                confetti(Object.assign({}, defaults, { 
-                    particleCount, 
-                    origin: { x: randomInRange(0.1, 0.3), y: Math.random() - 0.2 },
-                    colors: ['#ffd700', '#1e3a8a', '#ffffff'] // Warna Emas & Biru
-                }));
-                // Letupan Kanan
-                confetti(Object.assign({}, defaults, { 
-                    particleCount, 
-                    origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 },
-                    colors: ['#ffd700', '#1e3a8a', '#ffffff'] 
-                }));
-            }, 250);
 
             const btn = document.getElementById('downloadBtn');
             const btnText = document.getElementById('downloadBtnText');
@@ -582,7 +673,12 @@
         }
     }
 
-    function addSiswa() {
+    async function addSiswa() {
+        if (!authInitialized) {
+            showToast("Harap tunggu, database sedang menyambungkan.", "warning");
+            return;
+        }
+
         const nisn = document.getElementById('nisnInput').value.trim();
         const nama = document.getElementById('namaInput').value.trim();
         const tempat = document.getElementById('tempatInput').value.trim();
@@ -606,20 +702,25 @@
             return;
         }
 
-        database.siswa.unshift({ nisn, nama, tempat, tgl, orangtua, status, skl: null });
+        const newSiswa = { nisn, nama, tempat, tgl, orangtua, status, skl: null };
 
-        // Reset forms
-        document.getElementById('nisnInput').value = '';
-        document.getElementById('namaInput').value = '';
-        document.getElementById('tempatInput').value = '';
-        document.getElementById('tglInput').value = '';
-        document.getElementById('orangtuaInput').value = '';
-        document.getElementById('statusInput').value = 'lulus';
+        try {
+            // Write direct to Cloud Firestore
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'siswa', nisn), newSiswa);
+            
+            // Clear inputs
+            document.getElementById('nisnInput').value = '';
+            document.getElementById('namaInput').value = '';
+            document.getElementById('tempatInput').value = '';
+            document.getElementById('tglInput').value = '';
+            document.getElementById('orangtuaInput').value = '';
+            document.getElementById('statusInput').value = 'lulus';
 
-        updateSiswaList();
-        updateSiswaPilihan();
-        updateVerifikasi();
-        showToast('Data siswa berhasil ditambahkan!', 'success');
+            showToast('Siswa berhasil disimpan ke cloud database!', 'success');
+        } catch (error) {
+            console.error("Firebase Write Failed:", error);
+            showToast("Gagal menyimpan ke server.", "error");
+        }
     }
 
     function updateSiswaList() {
@@ -682,6 +783,11 @@
     }
 
     function uploadSKL() {
+        if (!authInitialized) {
+            showToast("Menunggu koneksi database...", "warning");
+            return;
+        }
+
         const nisn = document.getElementById('siswaPilihan').value;
         const fileInput = document.getElementById('sklFile');
         const file = fileInput.files[0];
@@ -702,18 +808,27 @@
         const siswa = database.siswa.find(s => s.nisn === nisn);
         const reader = new FileReader();
 
-        reader.onload = function(e) {
-            siswa.skl = {
+        reader.onload = async function(e) {
+            const sklData = {
                 name: file.name,
                 data: e.target.result
             };
 
-            document.getElementById('siswaPilihan').value = '';
-            fileInput.value = '';
-            document.getElementById('fileNameDisplay').innerText = "Hanya file PDF (Maks 5MB)";
+            try {
+                // Save document base64 direct to student document on Firestore
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'siswa', nisn), {
+                    skl: sklData
+                });
 
-            showToast(`SKL untuk ${siswa.nama} berhasil diunggah!`, 'success');
-            updateVerifikasi();
+                document.getElementById('siswaPilihan').value = '';
+                fileInput.value = '';
+                document.getElementById('fileNameDisplay').innerText = "Hanya file PDF (Maks 5MB)";
+
+                showToast(`SKL untuk ${siswa.nama} berhasil disimpan ke server!`, 'success');
+            } catch (err) {
+                console.error("Upload SKL failed:", err);
+                showToast("Gagal menyimpan dokumen SKL ke server.", "error");
+            }
         };
         reader.readAsDataURL(file);
     }
@@ -757,9 +872,6 @@
     function viewSKL(nisn) {
         const siswa = database.siswa.find(s => s.nisn === nisn);
         if (siswa && siswa.skl) {
-            // Because it's a data URL, we can open it in an iframe or try to trigger a download
-            // Many browsers block opening data/pdfs directly in new tabs for security.
-            // Let's trigger a download instead as a reliable fallback.
             const link = document.createElement('a');
             link.href = siswa.skl.data;
             link.download = `SKL_${siswa.nama.replace(/\s+/g, '_')}.pdf`;
@@ -771,7 +883,6 @@
     }
 
     function switchTab(tabId) {
-        // Reset classes
         document.querySelectorAll('.tab-btn').forEach(btn => {
             btn.classList.remove('active', 'text-gray-900');
             btn.classList.add('text-gray-500');
@@ -780,9 +891,11 @@
             content.classList.add('hidden');
         });
 
-        // Add active classes
-        event.currentTarget.classList.add('active');
-        event.currentTarget.classList.remove('text-gray-500');
+        const activeBtn = Array.from(document.querySelectorAll('.tab-btn')).find(btn => btn.getAttribute('onclick').includes(`'${tabId}'`));
+        if (activeBtn) {
+            activeBtn.classList.add('active');
+            activeBtn.classList.remove('text-gray-500');
+        }
         document.getElementById(`tab-${tabId}`).classList.remove('hidden');
     }
 
@@ -814,7 +927,20 @@
         showToast('Anda telah keluar dari sistem.', 'info');
     }
 
-    // --- Init ---
+    // --- Window Global Bindings for HTML Interaction ---
+    window.handleLogin = handleLogin;
+    window.logout = logout;
+    window.switchTab = switchTab;
+    window.addSiswa = addSiswa;
+    window.viewSKL = viewSKL;
+    window.downloadSKLSiswa = downloadSKLSiswa;
+    window.closeConfirmModal = closeConfirmModal;
+    window.updateLoginHint = updateLoginHint;
+    window.confirmDelete = confirmDelete;
+    window.uploadSKL = uploadSKL;
+    window.updateFileName = updateFileName;
+
+    // --- Init Local Elements ---
     updateLoginHint();
 </script>
 
